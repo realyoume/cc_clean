@@ -10,7 +10,6 @@ LOG_DIR="/root/cc_clean/logs"
 PYTHON="python"
 SCRIPT="/root/cc_clean/security_segment_filter.py"
 
-# 参数：开始ID、结束ID、并发数
 START_ID="${1:-0}"
 END_ID="${2:-100}"
 MAX_JOBS="${3:-4}"
@@ -23,6 +22,9 @@ echo "[INFO] END_ID:   ${END_ID}"
 echo "[INFO] MAX_JOBS: ${MAX_JOBS}"
 echo "============================================================"
 
+# -----------------------------
+# 核心处理函数
+# -----------------------------
 process_one() {
     local i="$1"
     local ID
@@ -40,25 +42,35 @@ process_one() {
         echo "[INFO] URL: ${URL}"
         echo "[INFO] INPUT: ${INPUT}"
         echo "[INFO] OUTPUT: ${OUTPUT}"
-        echo "[INFO] LOG: ${LOG}"
-        echo "[INFO] Start time: $(date '+%F %T')"
+        echo "[INFO] Start: $(date '+%F %T')"
 
+        # -----------------------------
+        # 如果结果已存在：直接跳过 + 删除旧输入（防脏数据）
+        # -----------------------------
         if [ -s "$OUTPUT" ]; then
-            echo "[SKIP] Output already exists: ${OUTPUT}"
+            echo "[SKIP] Output exists"
+
+            # 防止残留 WET
+            rm -f "$INPUT"
             exit 0
         fi
 
+        # -----------------------------
+        # 下载（失败也会清理 INPUT）
+        # -----------------------------
         echo "[INFO] Downloading..."
-        wget -q -c -O "$INPUT" "$URL"
+        if ! wget -q -c -O "$INPUT" "$URL"; then
+            echo "[ERROR] Download failed"
 
-        if [ $? -ne 0 ]; then
-            echo "[ERROR] Download failed: ${URL}"
             rm -f "$INPUT"
             exit 1
         fi
 
+        # -----------------------------
+        # 过滤（失败也清理 INPUT）
+        # -----------------------------
         echo "[INFO] Filtering..."
-        "$PYTHON" "$SCRIPT" \
+        if ! "$PYTHON" "$SCRIPT" \
             --input "$INPUT" \
             --output "$OUTPUT" \
             --target-segment-chars 1200 \
@@ -66,21 +78,27 @@ process_one() {
             --min-segment-chars 300 \
             --overlap-chars 150 \
             --no-count
+        then
+            echo "[ERROR] Filter failed"
 
-        if [ $? -ne 0 ]; then
-            echo "[ERROR] Filter failed: ${INPUT}"
-            echo "[INFO] Keeping input file for debugging: ${INPUT}"
+            rm -f "$INPUT"
             exit 1
         fi
 
-        echo "[INFO] Removing WET file..."
+        # -----------------------------
+        # 成功也要清理 INPUT
+        # -----------------------------
         rm -f "$INPUT"
 
         echo "[DONE] ${ID}"
-        echo "[INFO] End time: $(date '+%F %T')"
+        echo "[INFO] End: $(date '+%F %T')"
+
     } > "$LOG" 2>&1
 }
 
+# -----------------------------
+# 并发控制
+# -----------------------------
 running_jobs=0
 failed_jobs=0
 
@@ -88,10 +106,9 @@ for i in $(seq "$START_ID" "$END_ID"); do
     ID=$(printf "%05d" "$i")
     LOG="${LOG_DIR}/security_segments_candidates_${ID}.log"
 
-    echo "[LAUNCH] $(date '+%F %T') ${ID}, log: ${LOG}"
+    echo "[LAUNCH] $(date '+%F %T') ${ID} -> ${LOG}"
 
     process_one "$i" &
-
     running_jobs=$((running_jobs + 1))
 
     if [ "$running_jobs" -ge "$MAX_JOBS" ]; then
@@ -102,7 +119,9 @@ for i in $(seq "$START_ID" "$END_ID"); do
     fi
 done
 
-# 等待剩余任务
+# -----------------------------
+# 收尾
+# -----------------------------
 while [ "$running_jobs" -gt 0 ]; do
     if ! wait -n; then
         failed_jobs=$((failed_jobs + 1))
@@ -111,11 +130,9 @@ while [ "$running_jobs" -gt 0 ]; do
 done
 
 echo "============================================================"
-echo "[INFO] All jobs finished."
+echo "[INFO] Done"
 echo "[INFO] Failed jobs: ${failed_jobs}"
-echo "[INFO] Logs are in: ${LOG_DIR}"
+echo "[INFO] Logs: ${LOG_DIR}"
 echo "============================================================"
 
-if [ "$failed_jobs" -gt 0 ]; then
-    exit 1
-fi
+exit $((failed_jobs > 0))
